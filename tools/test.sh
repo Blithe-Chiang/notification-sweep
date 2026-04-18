@@ -11,6 +11,7 @@ cleanup() {
 trap cleanup EXIT
 
 TEST_BINARY="${TEMP_DIR}/NotificationSweepTests"
+APP_SOURCES=("${ROOT_DIR}/src/"*.m)
 APP_NAME="Notification Sweep"
 APP_PATH="${HOME}/Applications/${APP_NAME}.app"
 APP_EXECUTABLE="${APP_PATH}/Contents/MacOS/NotificationSweep"
@@ -61,30 +62,20 @@ wait_until_marker_gone() {
   return 1
 }
 
-post_test_notifications() {
-  local index
-
-  for index in 1 2; do
-    NOTIFICATION_SWEEP_MARKER="${MARKER}" \
-    NOTIFICATION_SWEEP_BODY="real notification ${index}" \
-      osascript -e 'display notification (system attribute "NOTIFICATION_SWEEP_BODY") with title (system attribute "NOTIFICATION_SWEEP_MARKER") subtitle "notification-sweep-test"'
-  done
-}
-
 clang -fobjc-arc \
   -Wall \
   -Wextra \
   -Werror \
   -framework AppKit \
   -framework ApplicationServices \
-  "${ROOT_DIR}/src/NotificationSweepApp.m" \
+  "${APP_SOURCES[@]}" \
   -o "${TEST_BINARY}"
 
 "${TEST_BINARY}" --self-test
 "${ROOT_DIR}/tools/build-app.sh"
 
 printf 'Posting real test notifications: %s\n' "${MARKER}"
-post_test_notifications
+"${ROOT_DIR}/tools/post-test-notifications.sh" "${MARKER}" 2
 
 if ! wait_until_marker_visible; then
   printf 'Real notification test failed: generated notifications were not visible in Notification Center.\n' >&2

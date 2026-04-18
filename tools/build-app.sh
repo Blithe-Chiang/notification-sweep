@@ -9,7 +9,7 @@ EXECUTABLE_NAME="NotificationSweep"
 INSTALL_DIR="${HOME}/Applications"
 APP_PATH="${INSTALL_DIR}/${APP_NAME}.app"
 OLD_APP_PATH="${INSTALL_DIR}/Notify Cleaner.app"
-APP_SOURCE="${ROOT_DIR}/src/NotificationSweepApp.m"
+APP_SOURCES=("${ROOT_DIR}/src/"*.m)
 ICON_GENERATOR_SOURCE="${ROOT_DIR}/tools/GenerateAppIcon.m"
 TEMP_DIR="$(mktemp -d)"
 ICONSET_PATH="${TEMP_DIR}/NotificationSweep.iconset"
@@ -46,7 +46,7 @@ render_icon "${ICONSET_PATH}/icon_512x512.png" 512
 render_icon "${ICONSET_PATH}/icon_512x512@2x.png" 1024
 
 iconutil --convert icns --output "${APP_PATH}/Contents/Resources/${ICON_FILE_NAME}" "${ICONSET_PATH}"
-clang -fobjc-arc -framework AppKit -framework ApplicationServices "${APP_SOURCE}" -o "${APP_PATH}/Contents/MacOS/${EXECUTABLE_NAME}"
+clang -fobjc-arc -framework AppKit -framework ApplicationServices "${APP_SOURCES[@]}" -o "${APP_PATH}/Contents/MacOS/${EXECUTABLE_NAME}"
 
 cat > "${APP_PATH}/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

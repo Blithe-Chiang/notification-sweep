@@ -7,7 +7,9 @@
 ## 项目结构
 
 - `src/NotificationSweepApp.m`
-  原生 app 主逻辑，负责通过 Accessibility API 查找并触发 `Clear All` / `Close`。
+  app 入口、辅助功能权限提示、清理流程编排，以及命令行诊断参数分发。
+- `src/NotificationSweepEngine.m`
+  通过 Accessibility API 查找并触发 `Clear All` / `Close` / `Dismiss`，包含匹配规则和内置自测。
 - `tools/GenerateAppIcon.m`
   构建时使用的图标生成器，会输出 app 所需的 `.icns` 资源。
 - `tools/build-app.sh`
@@ -74,6 +76,19 @@ xcode-select --install
 
 ```bash
 ./tools/build-app.sh
+```
+
+只想手动生成测试通知时可以单独运行：
+
+```bash
+./tools/post-test-notifications.sh
+./tools/post-test-notifications.sh "Notification Sweep Manual Test" 3
+```
+
+脚本会输出本次通知使用的 marker。构建 app 后，可以用这个 marker 手动检查通知中心文本：
+
+```bash
+~/Applications/Notification\ Sweep.app/Contents/MacOS/NotificationSweep --contains-text "Notification Sweep Manual Test"
 ```
 
 `./tools/test.sh` 还会创建两条真实 macOS 通知，打开通知中心，运行已安装的 `Notification Sweep.app` 清除通知，再确认测试通知已经消失。因此测试期间当前通知中心里其它可清除通知也会被一起清除。
