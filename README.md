@@ -1,6 +1,8 @@
 # Notification Sweep
 
-一个原生 macOS app，用辅助功能接口触发 `NotificationCenter` 里的 `Clear All` / `Close` 动作，效果接近通知中心里的清除按钮。
+一个原生 macOS app，用辅助功能接口触发 `NotificationCenter` 里的 `Clear All` / `Close` / `Dismiss` 动作，效果接近通知中心里的清除按钮。
+
+兼容 macOS 15 Sequoia 和 macOS 26 Tahoe：Sequoia 里通常能找到可见的清除按钮；Tahoe 移除了部分可见按钮后，应用会改为查找通知元素自身暴露的辅助功能动作。
 
 ## 项目结构
 
@@ -65,8 +67,16 @@ xcode-select --install
 完成修改后，至少跑一次：
 
 ```bash
+./tools/test.sh
+```
+
+这个命令会先运行不会清除真实通知的内置匹配逻辑测试，再构建并安装 app，然后执行真实通知的端到端测试。只想构建时可以单独运行：
+
+```bash
 ./tools/build-app.sh
 ```
+
+`./tools/test.sh` 还会创建两条真实 macOS 通知，打开通知中心，运行已安装的 `Notification Sweep.app` 清除通知，再确认测试通知已经消失。因此测试期间当前通知中心里其它可清除通知也会被一起清除。
 
 ## 权限
 
@@ -80,5 +90,5 @@ xcode-select --install
 
 - 这个工具依赖 macOS 当前版本里 `NotificationCenter` 的辅助功能结构。
 - 不同 macOS 版本的 UI 层级可能会变化。
-- 如果某些通知没有暴露 `Close` 或 `Clear All` 动作，它们无法被 app 强制关闭。
+- 如果某些通知没有暴露 `Clear All`、`Close`、`Clear` 或 `Dismiss` 动作，它们无法被 app 强制关闭。
 - 当前实现是原生 Cocoa + macOS Accessibility API，不依赖 Terminal、JXA、AppleScript 或 `System Events`。

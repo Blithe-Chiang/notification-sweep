@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
+#include <string.h>
 
 static NSString *const kNotificationSweepBundleIdentifier = @"local.notification-sweep.app";
 static NSString *const kNotificationCenterBundleIdentifier = @"com.apple.notificationcenterui";
@@ -80,13 +81,149 @@ static NSString *NormalizedActionName(NSString *rawName) {
         return @"";
     }
 
-    if ([rawName hasPrefix:@"Name:"]) {
-        NSRange newlineRange = [rawName rangeOfString:@"\n"];
-        NSString *firstLine = newlineRange.location == NSNotFound ? rawName : [rawName substringToIndex:newlineRange.location];
-        return [firstLine substringFromIndex:5];
+    NSString *trimmedName = [rawName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([trimmedName hasPrefix:@"Name:"]) {
+        NSRange newlineRange = [trimmedName rangeOfString:@"\n"];
+        NSString *firstLine = newlineRange.location == NSNotFound ? trimmedName : [trimmedName substringToIndex:newlineRange.location];
+        return [[firstLine substringFromIndex:5] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     }
 
-    return rawName;
+    return trimmedName;
+}
+
+static BOOL LabelEqualsAny(NSString *label, NSArray<NSString *> *targets) {
+    if (label.length == 0) {
+        return NO;
+    }
+
+    for (NSString *target in targets) {
+        if ([label caseInsensitiveCompare:target] == NSOrderedSame) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL IsClearAllLabel(NSString *label) {
+    return LabelEqualsAny(label, @[@"Clear All", @"Clear all"]);
+}
+
+static BOOL IsCloseLabel(NSString *label) {
+    return LabelEqualsAny(label, @[@"Close", @"Clear", @"Dismiss"]);
+}
+
+static NSString *MatchingExplicitActionNameForKind(NSArray<NSString *> *actions,
+                                                  NSString *role,
+                                                  NotificationSweepActionKind actionKind) {
+    for (NSString *action in actions) {
+        NSString *normalized = NormalizedActionName(action);
+        if (actionKind == NotificationSweepActionKindClearAll && IsClearAllLabel(normalized)) {
+            return action;
+        }
+
+        if (actionKind == NotificationSweepActionKindClose &&
+            IsCloseLabel(normalized) &&
+            ![role isEqualToString:(__bridge NSString *)kAXWindowRole]) {
+            return action;
+        }
+    }
+
+    return nil;
+}
+
+static BOOL HasPressAction(NSArray<NSString *> *actions) {
+    for (NSString *action in actions) {
+        if ([action isEqualToString:(__bridge NSString *)kAXPressAction]) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+static BOOL ElementLabelMatches(AXUIElementRef element, BOOL (*matcher)(NSString *)) {
+    NSArray *attributes = @[
+        (__bridge NSString *)kAXTitleAttribute,
+        (__bridge NSString *)kAXDescriptionAttribute,
+        (__bridge NSString *)kAXHelpAttribute,
+        (__bridge NSString *)kAXValueAttribute,
+        @"AXLabel"
+    ];
+
+    for (NSString *attribute in attributes) {
+        NSString *value = StringAXAttribute(element, (__bridge CFStringRef)attribute);
+        if (matcher(value)) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+static BOOL StringContainsText(NSString *value, NSString *needle) {
+    return value.length > 0 && needle.length > 0 && [value rangeOfString:needle options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
+
+static BOOL ElementContainsText(AXUIElementRef element, NSString *needle) {
+    NSArray *attributes = @[
+        (__bridge NSString *)kAXTitleAttribute,
+        (__bridge NSString *)kAXDescriptionAttribute,
+        (__bridge NSString *)kAXHelpAttribute,
+        (__bridge NSString *)kAXValueAttribute,
+        @"AXLabel"
+    ];
+
+    for (NSString *attribute in attributes) {
+        NSString *value = StringAXAttribute(element, (__bridge CFStringRef)attribute);
+        if (StringContainsText(value, needle)) {
+            return YES;
+        }
+    }
+
+    for (id child in ChildrenOfElement(element)) {
+        if (CFGetTypeID((__bridge CFTypeRef)child) == AXUIElementGetTypeID() &&
+            ElementContainsText((__bridge AXUIElementRef)child, needle)) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+static BOOL NotificationCenterContainsText(NSString *needle) {
+    NSArray<NSRunningApplication *> *apps = [NSRunningApplication runningApplicationsWithBundleIdentifier:kNotificationCenterBundleIdentifier];
+    if (apps.count == 0) {
+        return NO;
+    }
+
+    AXUIElementRef applicationElement = AXUIElementCreateApplication(apps.firstObject.processIdentifier);
+    NSArray *windows = CopyAXAttribute(applicationElement, kAXWindowsAttribute);
+    if (![windows isKindOfClass:[NSArray class]]) {
+        windows = @[];
+    }
+
+    BOOL found = NO;
+    for (id window in windows) {
+        if (CFGetTypeID((__bridge CFTypeRef)window) == AXUIElementGetTypeID() &&
+            ElementContainsText((__bridge AXUIElementRef)window, needle)) {
+            found = YES;
+            break;
+        }
+    }
+
+    CFRelease(applicationElement);
+    return found;
+}
+
+static void AddCandidate(NSMutableArray<NotificationSweepCandidate *> *candidates,
+                         AXUIElementRef element,
+                         NSString *windowName,
+                         NSString *actionName,
+                         NotificationSweepActionKind actionKind) {
+    [candidates addObject:[[NotificationSweepCandidate alloc] initWithElement:element
+                                                                   windowName:windowName
+                                                                   actionName:actionName
+                                                                   actionKind:actionKind]];
 }
 
 static void CollectCandidatesInElement(AXUIElementRef element,
@@ -94,30 +231,19 @@ static void CollectCandidatesInElement(AXUIElementRef element,
                                        NSMutableArray<NotificationSweepCandidate *> *clearAllCandidates,
                                        NSMutableArray<NotificationSweepCandidate *> *closeCandidates) {
     NSString *role = StringAXAttribute(element, kAXRoleAttribute);
-    if ([role isEqualToString:(__bridge NSString *)kAXButtonRole]) {
-        NSArray<NSString *> *actions = ActionNamesForElement(element);
-        NSString *clearAllAction = nil;
-        NSString *closeAction = nil;
+    NSArray<NSString *> *actions = ActionNamesForElement(element);
+    NSString *clearAllAction = MatchingExplicitActionNameForKind(actions, role, NotificationSweepActionKindClearAll);
+    NSString *closeAction = MatchingExplicitActionNameForKind(actions, role, NotificationSweepActionKindClose);
 
-        for (NSString *action in actions) {
-            NSString *normalized = NormalizedActionName(action);
-            if ([normalized isEqualToString:@"Clear All"]) {
-                clearAllAction = action;
-            } else if ([normalized isEqualToString:@"Close"]) {
-                closeAction = action;
-            }
-        }
-
-        if (clearAllAction != nil) {
-            [clearAllCandidates addObject:[[NotificationSweepCandidate alloc] initWithElement:element
-                                                                                   windowName:windowName
-                                                                                   actionName:clearAllAction
-                                                                                   actionKind:NotificationSweepActionKindClearAll]];
-        } else if (closeAction != nil) {
-            [closeCandidates addObject:[[NotificationSweepCandidate alloc] initWithElement:element
-                                                                                windowName:windowName
-                                                                                actionName:closeAction
-                                                                                actionKind:NotificationSweepActionKindClose]];
+    if (clearAllAction != nil) {
+        AddCandidate(clearAllCandidates, element, windowName, clearAllAction, NotificationSweepActionKindClearAll);
+    } else if (closeAction != nil) {
+        AddCandidate(closeCandidates, element, windowName, closeAction, NotificationSweepActionKindClose);
+    } else if (HasPressAction(actions) && [role isEqualToString:(__bridge NSString *)kAXButtonRole]) {
+        if (ElementLabelMatches(element, IsClearAllLabel)) {
+            AddCandidate(clearAllCandidates, element, windowName, (__bridge NSString *)kAXPressAction, NotificationSweepActionKindClearAll);
+        } else if (ElementLabelMatches(element, IsCloseLabel)) {
+            AddCandidate(closeCandidates, element, windowName, (__bridge NSString *)kAXPressAction, NotificationSweepActionKindClose);
         }
     }
 
@@ -194,6 +320,92 @@ static NSInteger PerformMatchingActions(NotificationSweepActionKind kind, NSErro
     return performedCount;
 }
 
+static int PrintCandidateCounts(void) {
+    NSArray<NotificationSweepCandidate *> *clearAllCandidates = CollectCandidatesForKind(NotificationSweepActionKindClearAll);
+    NSArray<NotificationSweepCandidate *> *closeCandidates = CollectCandidatesForKind(NotificationSweepActionKindClose);
+    printf("clear_all=%lu close=%lu total=%lu\n",
+           (unsigned long)clearAllCandidates.count,
+           (unsigned long)closeCandidates.count,
+           (unsigned long)(clearAllCandidates.count + closeCandidates.count));
+    return 0;
+}
+
+static int PrintContainsText(NSString *needle) {
+    BOOL found = NotificationCenterContainsText(needle);
+    printf("contains=%s\n", found ? "1" : "0");
+    return found ? 0 : 2;
+}
+
+static BOOL SelfTestStringEquals(NSString *actual, NSString *expected, NSString *caseName) {
+    BOOL passed = (actual == nil && expected == nil) || [actual isEqualToString:expected];
+    if (!passed) {
+        fprintf(stderr, "FAIL: %s expected \"%s\", got \"%s\"\n",
+                caseName.UTF8String,
+                expected.UTF8String ?: "(nil)",
+                actual.UTF8String ?: "(nil)");
+    }
+    return passed;
+}
+
+static BOOL SelfTestBoolEquals(BOOL actual, BOOL expected, NSString *caseName) {
+    if (actual != expected) {
+        fprintf(stderr, "FAIL: %s expected %s, got %s\n",
+                caseName.UTF8String,
+                expected ? "YES" : "NO",
+                actual ? "YES" : "NO");
+        return NO;
+    }
+    return YES;
+}
+
+static int RunSelfTests(void) {
+    NSInteger failures = 0;
+    NSString *buttonRole = (__bridge NSString *)kAXButtonRole;
+    NSString *windowRole = (__bridge NSString *)kAXWindowRole;
+    NSString *groupRole = @"AXGroup";
+
+    failures += !SelfTestStringEquals(NormalizedActionName(@" Clear All\n"),
+                                      @"Clear All",
+                                      @"trims plain action name");
+    failures += !SelfTestStringEquals(NormalizedActionName(@"Name:Dismiss\nTarget:notification"),
+                                      @"Dismiss",
+                                      @"normalizes verbose action name");
+    failures += !SelfTestStringEquals(MatchingExplicitActionNameForKind(@[@"Clear All"],
+                                                                        buttonRole,
+                                                                        NotificationSweepActionKindClearAll),
+                                      @"Clear All",
+                                      @"matches Sequoia Clear All action");
+    failures += !SelfTestStringEquals(MatchingExplicitActionNameForKind(@[@"Name:Clear\nTarget:notification"],
+                                                                        groupRole,
+                                                                        NotificationSweepActionKindClose),
+                                      @"Name:Clear\nTarget:notification",
+                                      @"matches Tahoe non-button Clear action");
+    failures += !SelfTestStringEquals(MatchingExplicitActionNameForKind(@[@"Dismiss"],
+                                                                        groupRole,
+                                                                        NotificationSweepActionKindClose),
+                                      @"Dismiss",
+                                      @"matches Tahoe Dismiss action");
+    failures += !SelfTestStringEquals(MatchingExplicitActionNameForKind(@[@"Close"],
+                                                                        windowRole,
+                                                                        NotificationSweepActionKindClose),
+                                      nil,
+                                      @"does not match Notification Center window close");
+    failures += !SelfTestBoolEquals(HasPressAction(@[(__bridge NSString *)kAXPressAction]),
+                                    YES,
+                                    @"detects AXPress fallback action");
+    failures += !SelfTestBoolEquals(IsCloseLabel(@"clear"),
+                                    YES,
+                                    @"matches close labels case-insensitively");
+
+    if (failures > 0) {
+        fprintf(stderr, "%ld self-test(s) failed\n", (long)failures);
+        return 1;
+    }
+
+    printf("All Notification Sweep self-tests passed\n");
+    return 0;
+}
+
 static void ShowAlertAndTerminate(NSString *message, BOOL offerSettings) {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Notification Sweep";
@@ -249,6 +461,18 @@ static void ShowAlertAndTerminate(NSString *message, BOOL offerSettings) {
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        if (argc > 1 && strcmp(argv[1], "--self-test") == 0) {
+            return RunSelfTests();
+        }
+
+        if (argc > 1 && strcmp(argv[1], "--count-candidates") == 0) {
+            return PrintCandidateCounts();
+        }
+
+        if (argc > 2 && strcmp(argv[1], "--contains-text") == 0) {
+            return PrintContainsText([NSString stringWithUTF8String:argv[2]]);
+        }
+
         [NSApplication sharedApplication];
         NotificationSweepAppDelegate *delegate = [[NotificationSweepAppDelegate alloc] init];
         [NSApp setDelegate:delegate];
